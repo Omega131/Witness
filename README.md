@@ -27,10 +27,10 @@ Instead of uploading raw, vulnerable files to a centralized database, Witness en
 
 ## Project Structure
 
-- \/contracts\: Contains the Hardhat project and the \WitnessAnchor.sol\ Solidity contract.
-- \/Witness\: Contains the Vite + React frontend application.
-  - \src/App.jsx\: The core React application containing the UI, web3 interactions, and on-device cryptography logic.
-  - \src/utils/pinata.js\: Helper functions for uploading encrypted blobs to IPFS.
+- contracts: Contains the Hardhat project and the \WitnessAnchor.sol\ Solidity contract.
+- Witness: Contains the Vite + React frontend application.
+- src/App.jsx: The core React application containing the UI, web3 interactions, and on-device cryptography logic.
+- src/utils/pinata.js: Helper functions for uploading encrypted blobs to IPFS.
 
 ## Local Development Setup
 
@@ -41,38 +41,38 @@ Instead of uploading raw, vulnerable files to a centralized database, Witness en
 - A Google Gemini API key (for AI detection).
 
 ### 2. Frontend Setup
-\\\ash
+
 cd Witness
 npm install
-\\\
 
-Create a \.env\ file in the \/Witness\ directory:
-\\\env
+
+Create a .env file in the /Witness directory:
+
 VITE_PINATA_JWT=your_pinata_jwt_here
 VITE_GEMINI_API_KEY=your_gemini_api_key_here
-\\\
+
 
 Start the development server:
-\\\bash
+
 npm run dev
-\\\
+
 
 ### 3. Smart Contract Setup
-\\\bash
+
 cd contracts
 npm install
-\\\
 
-Create a \.env\ file in the \/contracts\ directory:
-\\\env
+
+Create a .env file in the /contracts directory:
+
 RPC_URL=https://forno.celo-sepolia.celo-testnet.org
 PRIVATE_KEY=your_wallet_private_key
-\\\
+
 
 Deploy to Celo Sepolia:
-\\\Bash
+
 npx hardhat run scripts/deploy.js --network testnet
-\\\
+
 
 ## License
 MIT License
