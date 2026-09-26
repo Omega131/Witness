@@ -662,7 +662,7 @@ function VerifyView() {
         ];
       }
 
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -791,8 +791,8 @@ function VerifyView() {
                        <h2 style={{ fontSize: "14px", margin: 0, color: "#fff" }}>AI Detection Analysis</h2>
                     </div>
                     <div>
-                        <Badge tone={aiPercentage < 20 ? "good" : "amber"}>
-                          {aiPercentage < 20 ? "LIKELY HUMAN" : "LIKELY AI"}
+                        <Badge tone={aiPercentage < 50 ? "good" : "amber"}>
+                          {aiPercentage < 50 ? "LIKELY HUMAN" : "LIKELY AI"}
                         </Badge>
                         <div style={{ marginTop: "8px", fontSize: "13px", color: "#cbd5e1" }}>
                           Our detection model estimates this content is <strong style={{ color: "#fff" }}>{aiPercentage}%</strong> AI-generated.
