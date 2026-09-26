@@ -463,9 +463,15 @@ function CaptureView({ onAnchored }) {
       </div>
 
       {/* Action Button 1: Secure & Anchor (Local Browser Encryption) */}
-      <button className="w-btn-primary" onClick={doSecureLocally} disabled={securingLocally || Boolean(statusMsg)}>
+      <button className="w-btn-primary" onClick={doSecureLocally} disabled={securingLocally || Boolean(statusMsg) || pending || anchored}>
         {securingLocally ? "Securing Locally…" : "Secure & Anchor"}
       </button>
+      
+      {(textVal || selectedFileName || label || pending || anchored) && (
+        <button className="w-btn-ghost" style={{ marginTop: "10px" }} onClick={reset}>
+          Clear Input
+        </button>
+      )}
 
       {/* Pending Anchor Card */}
       {pending && (
@@ -863,8 +869,12 @@ export default function WitnessApp() {
 
         {/* Main Floating Workspace */}
         <main className="witness-main">
-          {tab === "capture" && <CaptureView onAnchored={() => setLedgerVersion((v) => v + 1)} />}
-          {tab === "verify" && <VerifyView />}
+          <div style={{ display: tab === "capture" ? "block" : "none" }}>
+            <CaptureView onAnchored={() => setLedgerVersion((v) => v + 1)} />
+          </div>
+          <div style={{ display: tab === "verify" ? "block" : "none" }}>
+            <VerifyView />
+          </div>
         </main>
       </div>
     </div>
