@@ -447,6 +447,7 @@ function CaptureView({ onAnchored }) {
           placeholder="Testimony"
           value={textVal}
           onChange={(e) => setTextVal(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && !securingLocally && !statusMsg && !pending && !anchored) doSecureLocally(); }}
           className="w-input"
         />
       </div>
@@ -458,6 +459,7 @@ function CaptureView({ onAnchored }) {
           placeholder="Label"
           value={label}
           onChange={(e) => setLabel(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && !securingLocally && !statusMsg && !pending && !anchored) doSecureLocally(); }}
           className="w-input"
         />
       </div>
@@ -686,6 +688,7 @@ function VerifyView() {
           placeholder="Paste WITNESS_PUBLIC code here…"
           value={verifyCode}
           onChange={(e) => setVerifyCode(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && !isVerifying) doVerify(); }}
           className="w-input"
         />
         <button className="w-btn-primary" style={{ marginTop: "14px" }} onClick={doVerify} disabled={isVerifying}>
@@ -718,6 +721,7 @@ function VerifyView() {
                 placeholder="Paste WITNESS_PRIVATE code here…"
                 value={decryptCode}
                 onChange={(e) => setDecryptCode(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter" && !isDecrypting) doDecrypt(); }}
                 className="w-input"
               />
               <button className="w-btn-primary" style={{ marginTop: "14px" }} onClick={doDecrypt} disabled={isDecrypting}>
