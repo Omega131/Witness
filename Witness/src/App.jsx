@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { ethers } from "ethers";
 import { uploadToPinata } from "./utils/pinata.js";
 
@@ -8,6 +8,59 @@ const CONTRACT_ABI = [
   "function anchors(bytes32) view returns (uint256)",
   "event Anchored(bytes32 indexed contentHash, string ipfsCid, uint256 timestamp)"
 ];
+
+const CELO_SEPOLIA_CHAIN_ID_HEX = "0xaa044c"; // 11142220
+const CELO_SEPOLIA_CONFIG = {
+  chainId: CELO_SEPOLIA_CHAIN_ID_HEX,
+  chainName: "Celo Sepolia Testnet",
+  nativeCurrency: {
+    name: "CELO",
+    symbol: "CELO",
+    decimals: 18,
+  },
+  rpcUrls: ["https://celo-sepolia.drpc.org", "https://forno.celo-sepolia.celo-testnet.org"],
+  blockExplorerUrls: ["https://celo-sepolia.blockscout.com"],
+};
+
+function getWeb3Provider() {
+  if (typeof window === "undefined") return null;
+  if (window.coinbaseWalletExtension) return window.coinbaseWalletExtension;
+  if (window.ethereum?.providers?.length) {
+    const cb = window.ethereum.providers.find((p) => p.isCoinbaseWallet);
+    if (cb) return cb;
+    return window.ethereum.providers[0];
+  }
+  if (window.ethereum) return window.ethereum;
+  return null;
+}
+
+async function ensureCeloNetwork(rawProvider) {
+  try {
+    const currentChainId = await rawProvider.request({ method: "eth_chainId" });
+    if (currentChainId === CELO_SEPOLIA_CHAIN_ID_HEX || parseInt(currentChainId, 16) === 11142220) {
+      return;
+    }
+    await rawProvider.request({
+      method: "wallet_switchEthereumChain",
+      params: [{ chainId: CELO_SEPOLIA_CHAIN_ID_HEX }],
+    });
+  } catch (err) {
+    if (
+      err.code === 4902 ||
+      err?.data?.originalError?.code === 4902 ||
+      err?.message?.includes("Unrecognized chain ID") ||
+      err?.message?.includes("wallet_addEthereumChain") ||
+      err?.message?.includes("4902")
+    ) {
+      await rawProvider.request({
+        method: "wallet_addEthereumChain",
+        params: [CELO_SEPOLIA_CONFIG],
+      });
+    } else {
+      console.warn("Chain switch note:", err);
+    }
+  }
+}
 
 const STORAGE_KEY = "witness_ledger_v1";
 
@@ -58,17 +111,22 @@ function saveLedger(items) {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
   } catch (e) {
-    /* ignore — demo storage is best-effort */
+    /* demo storage is best-effort */
   }
 }
 
-// ---------------- small UI atoms ----------------
+// ---------------- UI atoms ----------------
 
 function Badge({ children, tone = "cyan" }) {
-  const toneColor = { cyan: "var(--cyan-light)", amber: "var(--amber-light)", good: "var(--good)", bad: "var(--danger)" }[tone];
-  const toneBorder = { cyan: "var(--cyan)", amber: "var(--amber)", good: "var(--good)", bad: "var(--danger)" }[tone];
+  const toneStyle = {
+    cyan: { color: "#00e5cc", borderColor: "rgba(0, 229, 204, 0.4)", background: "rgba(0, 229, 204, 0.1)" },
+    good: { color: "#34d399", borderColor: "rgba(52, 211, 153, 0.4)", background: "rgba(52, 211, 153, 0.1)" },
+    bad: { color: "#f87171", borderColor: "rgba(248, 113, 113, 0.4)", background: "rgba(248, 113, 113, 0.1)" },
+    amber: { color: "#fbbf24", borderColor: "rgba(251, 191, 36, 0.4)", background: "rgba(251, 191, 36, 0.1)" }
+  }[tone] || { color: "#00e5cc", borderColor: "rgba(0, 229, 204, 0.4)", background: "rgba(0, 229, 204, 0.1)" };
+
   return (
-    <span className="w-badge" style={{ color: toneColor, borderColor: toneBorder }}>
+    <span className="w-badge" style={toneStyle}>
       {children}
     </span>
   );
@@ -99,12 +157,12 @@ function CopyField({ text }) {
       document.body.removeChild(ta);
     }
     setCopied(true);
-    setTimeout(() => setCopied(false), 1200);
+    setTimeout(() => setCopied(false), 1500);
   };
   return (
     <div className="w-copyable">
       <span className="w-copyable-v">{text}</span>
-      <button onClick={onCopy}>{copied ? "Copied" : "Copy"}</button>
+      <button type="button" onClick={onCopy}>{copied ? "✓ Copied" : "Copy"}</button>
     </div>
   );
 }
@@ -113,100 +171,151 @@ function CopyField({ text }) {
 
 function CaptureView({ onAnchored }) {
   const fileRef = useRef(null);
+  const [selectedFileName, setSelectedFileName] = useState("");
   const [textVal, setTextVal] = useState("");
   const [label, setLabel] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [pending, setPending] = useState(null); 
-  const [anchored, setAnchored] = useState(null); 
-  const [anchoring, setAnchoring] = useState(false);
+  const [securingLocally, setSecuringLocally] = useState(false);
+  const [statusMsg, setStatusMsg] = useState("");
+  const [pending, setPending] = useState(null);
+  const [anchored, setAnchored] = useState(null);
+  const [isDragOver, setIsDragOver] = useState(false);
 
-  const doHash = async () => {
-    setBusy(true);
-    try {
-      let bytes;
-      let lbl = label.trim();
-      let mimeType = "text/plain";
-      let fileName = "testimony.txt";
-
-      const file = fileRef.current?.files?.[0];
-      if (file) {
-        bytes = await file.arrayBuffer();
-        if (!lbl) lbl = file.name;
-        mimeType = file.type || "application/octet-stream";
-        fileName = file.name;
-      } else if (textVal.trim()) {
-        bytes = new TextEncoder().encode(textVal.trim());
-        if (!lbl) lbl = "Testimony note";
-      } else {
-        alert("Pick a file or type a testimony first.");
-        setBusy(false);
-        return;
+  const handleFileChange = (file) => {
+    if (file) {
+      setSelectedFileName(file.name);
+      if (!label.trim()) {
+        setLabel(file.name);
       }
+    }
+  };
 
+  const onDrop = (e) => {
+    e.preventDefault();
+    setIsDragOver(false);
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      const file = e.dataTransfer.files[0];
+      if (fileRef.current) {
+        const dt = new DataTransfer();
+        dt.items.add(file);
+        fileRef.current.files = dt.files;
+      }
+      handleFileChange(file);
+    }
+  };
+
+  // Step 1: Purely local client-side security and hashing
+  const doSecureLocally = async () => {
+    let bytes;
+    let lbl = label.trim();
+    let mimeType = "text/plain";
+    let fileName = "testimony.txt";
+
+    const file = fileRef.current?.files?.[0];
+    if (file) {
+      bytes = await file.arrayBuffer();
+      if (!lbl) lbl = file.name;
+      mimeType = file.type || "application/octet-stream";
+      fileName = file.name;
+    } else if (textVal.trim()) {
+      bytes = new TextEncoder().encode(textVal.trim());
+      if (!lbl) lbl = "Testimony note";
+    } else {
+      alert("Pick a file or type a testimony first.");
+      return;
+    }
+
+    setSecuringLocally(true);
+    try {
       const key = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt", "decrypt"]);
       const iv = crypto.getRandomValues(new Uint8Array(12));
       const encBuf = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, bytes);
       const rawKey = await crypto.subtle.exportKey("raw", key);
 
-      // V2 Architecture: Hash the ENCRYPTED blob instead of the raw file!
       const encHash = await sha256Hex(encBuf);
-
       const encB64 = bufToB64(encBuf);
       const ivB64 = bufToB64(iv.buffer);
       const keyB64 = bufToB64(rawKey);
 
-      setPending({
+      const pendingItem = {
         label: lbl,
-        hash: encHash, // This is now the hash of the encrypted file
+        hash: encHash,
         encB64,
         ivB64,
         keyB64,
         size: bytes.byteLength,
         mimeType,
-        fileName
-      });
+        fileName,
+        cid: null,
+      };
+
+      // Start Pinata IPFS upload immediately in background so it's already ready when Button 2 is clicked!
+      const pinataJwt = import.meta.env.VITE_PINATA_JWT;
+      if (pinataJwt) {
+        const encBlob = new Blob([encBuf]);
+        pendingItem.cidPromise = uploadToPinata(encBlob, pinataJwt)
+          .then((cid) => {
+            pendingItem.cid = cid;
+            setPending((prev) => (prev ? { ...prev, cid } : prev));
+            return cid;
+          })
+          .catch((err) => {
+            console.warn("Background Pinata upload note:", err);
+          });
+      }
+
+      setPending(pendingItem);
       setAnchored(null);
     } catch (e) {
-      alert("Something went wrong hashing that input: " + e.message);
+      alert("Error securing evidence: " + e.message);
+    } finally {
+      setSecuringLocally(false);
     }
-    setBusy(false);
   };
 
-  const doAnchor = async () => {
+  // Step 2: Separate action button to upload to IPFS and anchor on Celo Sepolia (opens Coinbase Wallet immediately on 1 click)
+  const doUploadAndAnchor = async () => {
     if (!pending) return;
-    
-    if (!window.ethereum) {
-      alert("Please install MetaMask or a Web3 wallet to anchor to the blockchain.");
+
+    const rawProvider = getWeb3Provider();
+    if (!rawProvider) {
+      alert("Please install Coinbase Wallet or MetaMask to anchor to the blockchain.");
       return;
     }
 
-    setAnchoring(true);
     try {
-      const provider = new ethers.BrowserProvider(window.ethereum);
-      await provider.send("eth_requestAccounts", []);
+      setStatusMsg("Connecting Coinbase…");
+      // Triggers Coinbase Wallet popup immediately on direct user click!
+      await rawProvider.request({ method: "eth_requestAccounts" });
+      await ensureCeloNetwork(rawProvider);
+
+      const provider = new ethers.BrowserProvider(rawProvider);
       const signer = await provider.getSigner();
-      
       const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer);
 
-      const existingTimestamp = await contract.anchors("0x" + pending.hash);
-      if (existingTimestamp > 0n) {
-        alert("This exact encrypted payload is already anchored on the blockchain.");
-        setAnchoring(false);
-        return;
+      // Resolve IPFS CID (either already finished in background or awaits completion)
+      let realCid = pending.cid;
+      if (!realCid) {
+        if (pending.cidPromise) {
+          setStatusMsg("Finalizing IPFS…");
+          realCid = await pending.cidPromise;
+        }
+        if (!realCid) {
+          setStatusMsg("Uploading to IPFS…");
+          const pinataJwt = import.meta.env.VITE_PINATA_JWT;
+          if (!pinataJwt) {
+            throw new Error("VITE_PINATA_JWT is not set in .env! Cannot upload to IPFS.");
+          }
+          const encBlob = new Blob([b64ToBuf(pending.encB64)]);
+          realCid = await uploadToPinata(encBlob, pinataJwt);
+        }
+        pending.cid = realCid;
+        setPending((prev) => (prev ? { ...prev, cid: realCid } : prev));
       }
 
-      // IPFS Upload
-      let realCid = "";
-      const pinataJwt = import.meta.env.VITE_PINATA_JWT;
-      if (!pinataJwt) {
-        throw new Error("VITE_PINATA_JWT is not set in .env! Cannot upload to IPFS.");
-      }
-      
-      const encBlob = new Blob([b64ToBuf(pending.encB64)]);
-      realCid = await uploadToPinata(encBlob, pinataJwt);
-
-      // On-chain transaction
-      const tx = await contract.anchor("0x" + pending.hash, realCid);
+      // Prompt on-chain confirmation in Coinbase Wallet with explicit gasLimit
+      setStatusMsg("Confirm in Coinbase…");
+      const tx = await contract.anchor("0x" + pending.hash, realCid, { gasLimit: 350000 });
+      setStatusMsg("Waiting for Celo block…");
       const receipt = await tx.wait();
 
       const txHash = tx.hash;
@@ -224,8 +333,9 @@ function CaptureView({ onAnchored }) {
         cid: realCid,
         txHash,
         block,
-        timestamp,
+        timestamp
       };
+
       const ledger = loadLedger();
       ledger.push(record);
       saveLedger(ledger);
@@ -242,67 +352,133 @@ function CaptureView({ onAnchored }) {
       onAnchored?.();
       setPending(null);
     } catch (e) {
-      alert("Error anchoring: " + (e.reason || e.message));
+      console.error(e);
+      if (e.code === 4001 || e.message?.includes("rejected")) {
+        alert("Transaction was cancelled in Coinbase Wallet.");
+      } else {
+        alert("Error anchoring: " + (e.reason || e.message));
+      }
+    } finally {
+      setStatusMsg("");
     }
-    setAnchoring(false);
   };
 
   const reset = () => {
     if (fileRef.current) fileRef.current.value = "";
+    setSelectedFileName("");
     setTextVal("");
     setLabel("");
+    setSecuringLocally(false);
+    setStatusMsg("");
     setPending(null);
     setAnchored(null);
   };
 
   return (
-    <>
-      <div className="w-card">
-        <h2><span className="w-step">1</span>Capture evidence</h2>
-        <div className="w-desc">Pick a file, or type a testimony. Hashing and encryption happen entirely on this device — nothing unencrypted ever leaves it.</div>
-        <input type="file" ref={fileRef} />
-        <div style={{ textAlign: "center", color: "var(--muted)", fontSize: 12, margin: "8px 0" }}>— or —</div>
-        <textarea rows={3} placeholder="Type a testimony or note instead of uploading a file…" value={textVal} onChange={(e) => setTextVal(e.target.value)} />
-        <input type="text" placeholder='Short label (e.g. "Site photo — 21 Sep")' style={{ marginTop: 8 }} value={label} onChange={(e) => setLabel(e.target.value)} />
-        <button className="w-btn" onClick={doHash} disabled={busy}>{busy ? "Hashing…" : "Hash + Encrypt on this device"}</button>
+    <div className="w-form-flow">
+      {/* Drag & Drop File Zone */}
+      <div
+        className={`w-dropzone ${isDragOver ? "dragover" : ""}`}
+        onDragOver={(e) => {
+          e.preventDefault();
+          setIsDragOver(true);
+        }}
+        onDragLeave={() => setIsDragOver(false)}
+        onDrop={onDrop}
+        onClick={() => fileRef.current?.click()}
+      >
+        <input
+          type="file"
+          ref={fileRef}
+          style={{ display: "none" }}
+          onChange={(e) => handleFileChange(e.target.files?.[0])}
+        />
+        <div className="w-drop-text">
+          {selectedFileName ? (
+            <span style={{ color: "#00e5cc", fontWeight: 600 }}>Selected: {selectedFileName}</span>
+          ) : (
+            <>
+              Drag &amp; Drop File or <span className="w-browse-btn">Browse</span>
+            </>
+          )}
+        </div>
       </div>
 
+      {/* Testimony Input */}
+      <div>
+        <input
+          type="text"
+          placeholder="Testimony"
+          value={textVal}
+          onChange={(e) => setTextVal(e.target.value)}
+          className="w-input"
+        />
+      </div>
+
+      {/* Label Input */}
+      <div>
+        <input
+          type="text"
+          placeholder="Label"
+          value={label}
+          onChange={(e) => setLabel(e.target.value)}
+          className="w-input"
+        />
+      </div>
+
+      {/* Action Button 1: Secure & Anchor (Local Browser Encryption) */}
+      <button className="w-btn-primary" onClick={doSecureLocally} disabled={securingLocally || Boolean(statusMsg)}>
+        {securingLocally ? "Securing Locally…" : "Secure & Anchor"}
+      </button>
+
+      {/* Pending Anchor Card */}
       {pending && (
-        <div className="w-card">
-          <h2><span className="w-step">2</span>On-device result</h2>
-          <div className="w-desc">This is what would be sent onward — a hash of the encrypted blob.</div>
-          <KV k="Encrypted SHA-256 hash" v={"0x" + pending.hash} />
-          <KV k="Encrypted size" v={`${pending.size} bytes → ${Math.ceil(pending.encB64.length * 0.75)} bytes encrypted`} />
-          <button className="w-btn" onClick={doAnchor} disabled={anchoring}>
-            {anchoring ? "⛓ Uploading to IPFS & Anchoring..." : "⛓ Anchor hash to chain"}
+        <div className="w-card" style={{ marginTop: "18px" }}>
+          <div className="w-card-header">
+            <span className="w-step">✓</span>
+            <h2>Evidence Secured Locally</h2>
+          </div>
+          <div className="w-desc">Encrypted ciphertext and SHA-256 hash ready for on-chain anchoring.</div>
+          <KV k="Encrypted SHA-256 Hash" v={"0x" + pending.hash} />
+          <KV k="Encrypted Size" v={`${pending.size} bytes → ${Math.ceil(pending.encB64.length * 0.75)} bytes encrypted`} />
+
+          {/* Action Button 2: Upload to IPFS and Anchor On-Chain via Coinbase */}
+          <button className="w-btn-primary" style={{ marginTop: "16px" }} onClick={doUploadAndAnchor} disabled={Boolean(statusMsg)}>
+            {statusMsg ? `⛓ ${statusMsg}` : "⛓ Upload to IPFS & Anchor"}
           </button>
         </div>
       )}
 
+      {/* Anchored Confirmation Card */}
       {anchored && (
-        <div className="w-card">
-          <h2>✅ Anchored Securely</h2>
-          <KV k="Tx hash" v={anchored.txHash} />
-          <KV k="Block" v={"#" + anchored.block} />
+        <div className="w-card" style={{ marginTop: "18px" }}>
+          <div className="w-card-header">
+            <span style={{ fontSize: "18px" }}>✅</span>
+            <h2 style={{ color: "#34d399" }}>Anchored Securely on Chain</h2>
+          </div>
+          <KV k="Tx Hash" v={anchored.txHash} />
+          <KV k="Block Number" v={"#" + anchored.block} />
           <KV k="Timestamp" v={anchored.timestamp.replace("T", " ").slice(0, 19) + " UTC"} />
           <div className="w-divider" />
           
           <div className="w-desc" style={{ marginBottom: 6 }}>
-            <strong style={{color: "var(--cyan-light)"}}>1. Public Verification Code</strong><br/>
-            Share this publicly to prove the file exists and is timestamped, without revealing the file itself.
+            <strong style={{ color: "var(--cyan)" }}>1. Public Verification Code</strong><br />
+            Share publicly to prove the file exists and is timestamped, without revealing the content.
           </div>
           <CopyField text={anchored.verifyCode} />
-          
+
           <div className="w-desc" style={{ marginBottom: 6, marginTop: 16 }}>
-            <strong style={{color: "var(--amber-light)"}}>2. Private Decryption Key</strong><br/>
-            Share this ONLY with authorized people to let them read the actual file.
+            <strong style={{ color: "#fbbf24" }}>2. Private Decryption Key</strong><br />
+            Share ONLY with authorized people to let them decrypt and view the file.
           </div>
           <CopyField text={anchored.decryptCode} />
-          
-          <button className="w-btn w-btn-ghost" style={{marginTop: 20}} onClick={reset}>Anchor another item</button>
+
+          <button className="w-btn-ghost" style={{ marginTop: "18px" }} onClick={reset}>
+            Anchor Another Item
+          </button>
         </div>
       )}
-    </>
+    </div>
   );
 }
 
@@ -314,30 +490,38 @@ function LedgerView({ version }) {
   }, [version]);
 
   const reset = () => {
-    if (confirm("Clear the simulated ledger? This only affects this browser's demo data.")) {
+    if (confirm("Clear the simulated ledger cache? This only affects this browser's demo data.")) {
       saveLedger([]);
       setLedger([]);
     }
   };
 
   return (
-    <div className="w-card">
-      <h2>Public ledger (simulated indexer)</h2>
-      <div className="w-desc">Every anchor is append-only and visible to anyone — exactly like a real public blockchain explorer. Only hashes and timestamps live here, never content.</div>
-      {ledger.length === 0 ? (
-        <div className="w-empty">No anchors yet — go anchor something in the Capture tab.</div>
-      ) : (
-        ledger.map((r) => (
-          <div className="w-ledger-item" key={r.id}>
-            <div className="w-ledger-lbl">{r.label}</div>
-            <KV k="Hash" v={"0x" + r.hash.slice(0, 16) + "…" + r.hash.slice(-8)} />
-            <KV k="Block" v={"#" + r.block} />
-            <KV k="Timestamp" v={r.timestamp.replace("T", " ").slice(0, 19) + " UTC"} />
-            {r.cid && <KV k="CID" v={r.cid.slice(0, 20) + "…"} />}
-          </div>
-        ))
-      )}
-      <button className="w-btn w-btn-danger" style={{ marginTop: 14 }} onClick={reset}>Reset local indexer cache</button>
+    <div className="w-form-flow">
+      <div className="w-card">
+        <div className="w-card-header">
+          <h2>Public Immutable Ledger</h2>
+        </div>
+        <div className="w-desc">
+          Every anchor is append-only and visible on-chain. Only cryptographic hashes and timestamps live here.
+        </div>
+        {ledger.length === 0 ? (
+          <div className="w-empty">No anchors yet — anchor evidence in the Capture tab to see records here.</div>
+        ) : (
+          ledger.map((r) => (
+            <div className="w-ledger-item" key={r.id}>
+              <div className="w-ledger-lbl">{r.label}</div>
+              <KV k="Hash" v={"0x" + r.hash.slice(0, 16) + "…" + r.hash.slice(-8)} />
+              <KV k="Block" v={"#" + r.block} />
+              <KV k="Timestamp" v={r.timestamp.replace("T", " ").slice(0, 19) + " UTC"} />
+              {r.cid && <KV k="IPFS CID" v={r.cid.slice(0, 20) + "…"} />}
+            </div>
+          ))
+        )}
+        <button className="w-btn-danger" style={{ marginTop: "16px" }} onClick={reset}>
+          Reset Local Indexer Cache
+        </button>
+      </div>
     </div>
   );
 }
@@ -360,18 +544,21 @@ function VerifyView() {
     const trimmed = verifyCode.trim();
     setVerifyResult(null); setFetchedEncBuf(null); setDecryptResult(null); setLastBytes(null); setPreview("");
     if (!trimmed) return;
-    
+
     setIsVerifying(true);
     try {
       if (!trimmed.startsWith("WITNESS_PUBLIC.")) throw new Error("Invalid Public Verification Code.");
       const payload = JSON.parse(atob(trimmed.slice("WITNESS_PUBLIC.".length)));
-      
+
+      // 1. Fetch encrypted blob from IPFS
       const res = await fetch("https://gateway.pinata.cloud/ipfs/" + payload.c);
       if (!res.ok) throw new Error("Failed to fetch encrypted file from IPFS.");
       const encBuf = await res.arrayBuffer();
 
+      // 2. Hash the encrypted payload
       const encHash = await sha256Hex(encBuf);
 
+      // 3. Verify on Blockchain (Public Read via Celo Sepolia)
       const provider = new ethers.JsonRpcProvider("https://forno.celo-sepolia.celo-testnet.org");
       const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, provider);
       const onChainTimestamp = await contract.anchors("0x" + encHash);
@@ -380,7 +567,7 @@ function VerifyView() {
         const dateStr = new Date(Number(onChainTimestamp) * 1000).toISOString().replace("T", " ").slice(0, 19);
         setVerifyResult({
           ok: true,
-          message: `Encrypted payload verified! Matches exactly with Celo block timestamped at ${dateStr} UTC. (Contents are still hidden).`
+          message: `Encrypted payload verified! Matches exactly with Celo block timestamped at ${dateStr} UTC. (Contents are still encrypted).`
         });
         setFetchedEncBuf(encBuf);
       } else {
@@ -399,7 +586,7 @@ function VerifyView() {
     const trimmed = decryptCode.trim();
     setDecryptResult(null); setLastBytes(null); setPreview("");
     if (!trimmed || !fetchedEncBuf) return;
-    
+
     setIsDecrypting(true);
     try {
       if (!trimmed.startsWith("WITNESS_PRIVATE.")) throw new Error("Invalid Private Decryption Code.");
@@ -409,10 +596,10 @@ function VerifyView() {
       const key = await crypto.subtle.importKey("raw", keyBuf, { name: "AES-GCM" }, false, ["decrypt"]);
       const iv = new Uint8Array(b64ToBuf(payload.i));
       const decBuf = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, fetchedEncBuf);
-      
+
       setLastBytes(decBuf);
       setLastRecord({ mimeType: payload.m, fileName: payload.f });
-      
+
       setDecryptResult({
         ok: true,
         message: "Successfully decrypted the verified evidence."
@@ -438,82 +625,122 @@ function VerifyView() {
   };
 
   return (
-    <>
+    <div className="w-form-flow">
+      {/* Step 1: Public Verification */}
       <div className="w-card">
-        <h2>1. Public Verification (No Decryption)</h2>
-        <div className="w-desc">Paste a Public Code to fetch the encrypted file and verify its hash on the blockchain.</div>
-        <textarea rows={2} placeholder="Paste WITNESS_PUBLIC code here…" value={verifyCode} onChange={(e) => setVerifyCode(e.target.value)} />
-        <button className="w-btn w-btn-secondary" onClick={doVerify} disabled={isVerifying}>
-          {isVerifying ? "Fetching & Verifying..." : "Verify Authenticity"}
+        <div className="w-card-header">
+          <h2>1. Public Verification (No Decryption)</h2>
+        </div>
+        <div className="w-desc">
+          Paste a Public Verification Code to fetch the encrypted file from IPFS and verify its hash on the blockchain.
+        </div>
+        <input
+          type="text"
+          placeholder="Paste WITNESS_PUBLIC code here…"
+          value={verifyCode}
+          onChange={(e) => setVerifyCode(e.target.value)}
+          className="w-input"
+        />
+        <button className="w-btn-primary" style={{ marginTop: "14px" }} onClick={doVerify} disabled={isVerifying}>
+          {isVerifying ? "Fetching from IPFS & Verifying..." : "Verify Authenticity"}
         </button>
       </div>
 
+      {/* Step 1 Result & Step 2 Decryption */}
       {verifyResult && (
-        <div className="w-card">
-          <div className={`w-result ${verifyResult.ok ? "w-result-good" : "w-result-bad"}`}>
-            <Badge tone={verifyResult.ok ? "good" : "bad"}>{verifyResult.ok ? "VERIFIED" : "ERROR"}</Badge>
-            {verifyResult.message}
+        <div className="w-card" style={{ marginTop: "16px" }}>
+          <div className="w-card-header">
+            <h2>Verification Status</h2>
           </div>
-          
+          <div className={`w-result ${verifyResult.ok ? "w-result-good" : "w-result-bad"}`}>
+            <Badge tone={verifyResult.ok ? "good" : "bad"}>{verifyResult.ok ? "VERIFIED IMMUTABLE" : "ERROR"}</Badge>
+            <div style={{ marginTop: "6px" }}>{verifyResult.message}</div>
+          </div>
+
           {verifyResult.ok && fetchedEncBuf && (
-            <div style={{ marginTop: 20 }}>
+            <div style={{ marginTop: "20px" }}>
               <div className="w-divider" />
-              <h2>2. Decrypt Evidence</h2>
-              <div className="w-desc">You proved the encrypted file is authentic. If the uploader gave you authorization, paste the Private Key below to read it.</div>
-              <textarea rows={2} placeholder="Paste WITNESS_PRIVATE code here…" value={decryptCode} onChange={(e) => setDecryptCode(e.target.value)} />
-              <button className="w-btn" onClick={doDecrypt} disabled={isDecrypting}>
-                {isDecrypting ? "Decrypting..." : "Decrypt Evidence"}
+              <div className="w-card-header">
+                <h2>2. Decrypt Evidence</h2>
+              </div>
+              <div className="w-desc">
+                The encrypted file's on-chain authenticity is mathematically proven. If you are authorized, paste the Private Key below to decrypt and read it.
+              </div>
+              <input
+                type="text"
+                placeholder="Paste WITNESS_PRIVATE code here…"
+                value={decryptCode}
+                onChange={(e) => setDecryptCode(e.target.value)}
+                className="w-input"
+              />
+              <button className="w-btn-primary" style={{ marginTop: "14px" }} onClick={doDecrypt} disabled={isDecrypting}>
+                {isDecrypting ? "Decrypting…" : "Decrypt Evidence"}
               </button>
             </div>
           )}
         </div>
       )}
 
+      {/* Step 2 Decrypted Output */}
       {decryptResult && (
-        <div className="w-card">
+        <div className="w-card" style={{ marginTop: "16px" }}>
+          <div className="w-card-header">
+            <h2>Decrypted Content</h2>
+          </div>
           <div className={`w-result ${decryptResult.ok ? "w-result-good" : "w-result-bad"}`}>
             <Badge tone={decryptResult.ok ? "good" : "bad"}>{decryptResult.ok ? "UNLOCKED" : "ERROR"}</Badge>
-            {decryptResult.message}
+            <div style={{ marginTop: "6px" }}>{decryptResult.message}</div>
           </div>
           {decryptResult.ok && (
             <>
               <div className="w-divider" />
-              <div className="w-desc" style={{ marginBottom: 6 }}>Recovered content preview</div>
+              <div className="w-desc" style={{ marginBottom: 6 }}>Recovered Content Preview</div>
               <div className="w-preview">{preview}</div>
-              <div style={{ display: "flex", gap: "10px", marginTop: "10px" }}>
-                <button className="w-btn" onClick={doDownload}>📥 Download File</button>
+              <div style={{ marginTop: "14px" }}>
+                <button className="w-btn-primary" onClick={doDownload}>
+                  📥 Download Decrypted File
+                </button>
               </div>
             </>
           )}
         </div>
       )}
-    </>
+    </div>
   );
 }
 
 function AboutView() {
   return (
-    <>
+    <div className="w-form-flow">
       <div className="w-card">
-        <h2>Why this can't be a normal database</h2>
-        <div className="w-desc">A centralized timestamp server can be pressured, hacked, or compelled to falsify records by exactly the actors this tool protects people from. A public chain removes that single point of coercion — no one party controls it, so no one party can rewrite history on it.</div>
+        <div className="w-card-header">
+          <h2>Why Trustless Architecture?</h2>
+        </div>
+        <div className="w-desc">
+          A centralized timestamp server can be pressured, hacked, or compelled to falsify records by exactly the actors this tool protects people from. A public chain removes that single point of coercion — no one party controls it, so no one party can rewrite history on it.
+        </div>
       </div>
-      <div className="w-card">
-        <h2>What's real in this version?</h2>
-        <KV k="SHA-256 hashing" v={<span style={{ color: "var(--good)" }}>Real — Web Crypto API</span>} />
-        <KV k="AES-GCM encryption" v={<span style={{ color: "var(--good)" }}>Real — Web Crypto API</span>} />
-        <KV k="Blockchain anchor" v={<span style={{ color: "var(--good)" }}>Real — Live on Celo Sepolia</span>} />
-        <KV k="IPFS storage" v={<span style={{ color: "var(--good)" }}>Real — via Pinata</span>} />
+
+      <div className="w-card" style={{ marginTop: "16px" }}>
+        <div className="w-card-header">
+          <h2>What's Real in This Version?</h2>
+        </div>
+        <KV k="SHA-256 Hashing" v={<span style={{ color: "#34d399" }}>Real — Web Crypto API</span>} />
+        <KV k="AES-GCM Encryption" v={<span style={{ color: "#34d399" }}>Real — Web Crypto API</span>} />
+        <KV k="Blockchain Anchor" v={<span style={{ color: "#34d399" }}>Real — Live on Celo Sepolia</span>} />
+        <KV k="IPFS Storage" v={<span style={{ color: "#34d399" }}>Real — via Pinata</span>} />
       </div>
-    </>
+    </div>
   );
 }
 
+// ---------------- Root Component ----------------
+
 const TABS = [
-  { id: "capture", label: "Capture & Anchor" },
+  { id: "capture", label: "Capture" },
   { id: "ledger", label: "Ledger" },
-  { id: "verify", label: "Verify & Reveal" },
-  { id: "about", label: "How It Works" },
+  { id: "verify", label: "Verify" },
+  { id: "about", label: "About" }
 ];
 
 export default function WitnessApp() {
@@ -523,86 +750,518 @@ export default function WitnessApp() {
   return (
     <div className="witness-root">
       <style>{CSS}</style>
-      <header className="w-top">
-        <div className="w-top-inner">
-          <div className="w-eyebrow">Build For Billions · Team Big Bihh · Web3 &amp; Privacy</div>
-          <h1 className="w-brand">🔏 WITNESS</h1>
-          <nav className="w-tabs">
-            {TABS.map((t) => (
-              <button key={t.id} className={tab === t.id ? "active" : ""} onClick={() => setTab(t.id)}>
-                {t.label}
-              </button>
-            ))}
-          </nav>
-        </div>
-      </header>
-      <main className="w-main">
-        {tab === "capture" && <CaptureView onAnchored={() => setLedgerVersion((v) => v + 1)} />}
-        {tab === "ledger" && <LedgerView version={ledgerVersion} />}
-        {tab === "verify" && <VerifyView />}
-        {tab === "about" && <AboutView />}
-      </main>
+
+      {/* Authentic Cybernetic Mesh Terrain Background from Mockup */}
+      <div className="witness-mesh-bg" />
+
+      <div className="witness-container">
+        {/* Hero Section: Truly transparent glowing eye, Orbitron title, tagline */}
+        <header className="witness-hero">
+          <div className="witness-eye-container">
+            <img
+              src="/logo_eye_transparent.png"
+              alt="Witness Eye"
+              className="witness-eye-img"
+            />
+          </div>
+          <h1 className="witness-title">WITNESS</h1>
+          <p className="witness-tagline">Immutable proof. Zero trust required.</p>
+        </header>
+
+        {/* Navigation Tabs with '|' separators and NO horizontal divider line */}
+        <nav className="witness-tabs">
+          <button
+            className={`witness-tab-btn ${tab === "capture" ? "active" : ""}`}
+            onClick={() => setTab("capture")}
+          >
+            Capture
+          </button>
+          <span className="witness-tab-pipe">|</span>
+          <button
+            className={`witness-tab-btn ${tab === "ledger" ? "active" : ""}`}
+            onClick={() => setTab("ledger")}
+          >
+            Ledger
+          </button>
+          <span className="witness-tab-pipe">|</span>
+          <button
+            className={`witness-tab-btn ${tab === "verify" ? "active" : ""}`}
+            onClick={() => setTab("verify")}
+          >
+            Verify
+          </button>
+          <span className="witness-tab-pipe">|</span>
+          <button
+            className={`witness-tab-btn ${tab === "about" ? "active" : ""}`}
+            onClick={() => setTab("about")}
+          >
+            About
+          </button>
+        </nav>
+
+        {/* Main Floating Workspace */}
+        <main className="witness-main">
+          {tab === "capture" && <CaptureView onAnchored={() => setLedgerVersion((v) => v + 1)} />}
+          {tab === "ledger" && <LedgerView version={ledgerVersion} />}
+          {tab === "verify" && <VerifyView />}
+          {tab === "about" && <AboutView />}
+        </main>
+      </div>
     </div>
   );
 }
 
+// ---------------- Styles Matching Mockup Exactly ----------------
+
 const CSS = `
 .witness-root {
-  --ink: #0B0F14;
-  --panel: #121821;
-  --panel2: #171f2a;
-  --paper: #EDE7D9;
-  --amber: #C97A2B;
-  --amber-light: #E3A25C;
-  --cyan: #2E8C8C;
-  --cyan-light: #4FB3B3;
-  --line: #2a333f;
-  --muted: #8a94a3;
-  --danger: #C24B4B;
-  --good: #3FA45C;
-  background: radial-gradient(circle at 15% 0%, #17202b 0%, var(--ink) 60%);
-  color: var(--paper);
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
-  font-size: 15px;
-  line-height: 1.5;
+  position: relative;
   min-height: 100vh;
+  background-color: #040810;
+  color: #e2e8f0;
+  overflow-x: hidden;
+  font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
 }
-.witness-root * { box-sizing: border-box; }
-.witness-root .w-top { position: sticky; top: 0; background: rgba(11,15,20,0.92); backdrop-filter: blur(6px); border-bottom: 1px solid var(--line); z-index: 10; }
-.witness-root .w-top-inner { padding: 14px 16px 10px; }
-.witness-root .w-eyebrow { font-family: 'SFMono-Regular', Consolas, monospace; font-size: 10.5px; letter-spacing: 2px; text-transform: uppercase; color: var(--amber-light); }
-.witness-root .w-brand { margin: 2px 0 8px; font-size: 22px; font-weight: 800; letter-spacing: 0.5px; }
-.witness-root .w-tabs { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 2px; }
-.witness-root .w-tabs button { flex: none; background: transparent; border: 1px solid var(--line); color: var(--muted); padding: 7px 12px; border-radius: 20px; font-size: 12.5px; font-weight: 600; white-space: nowrap; cursor: pointer; }
-.witness-root .w-tabs button.active { background: var(--amber); border-color: var(--amber); color: #1a1006; }
-.witness-root .w-main { max-width: 720px; margin: 0 auto; padding: 18px 16px 60px; }
-.witness-root .w-card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 14px; }
-.witness-root .w-card h2 { margin: 0 0 4px; font-size: 16px; display: flex; align-items: center; }
-.witness-root .w-desc { color: var(--muted); font-size: 13px; margin-bottom: 12px; }
-.witness-root .w-step { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 50%; background: var(--ink); color: var(--amber-light); font-family: 'SFMono-Regular', Consolas, monospace; font-size: 11px; margin-right: 8px; border: 1px solid var(--line); }
-.witness-root input[type="file"] { display: block; width: 100%; font-size: 13px; color: var(--muted); }
-.witness-root textarea, .witness-root input[type="text"] { width: 100%; background: var(--panel2); border: 1px solid var(--line); color: var(--paper); border-radius: 6px; padding: 10px; font-size: 13.5px; font-family: inherit; resize: vertical; }
-.witness-root textarea:focus, .witness-root input:focus { outline: 1px solid var(--cyan); }
-.witness-root .w-btn { background: var(--amber); color: #1a1006; border: none; padding: 11px 16px; border-radius: 7px; font-weight: 700; font-size: 13.5px; width: 100%; margin-top: 10px; cursor: pointer; }
-.witness-root .w-btn:disabled { opacity: 0.4; }
-.witness-root .w-btn-secondary { background: transparent; color: var(--cyan-light); border: 1px solid var(--cyan); }
-.witness-root .w-btn-ghost { background: transparent; color: var(--muted); border: 1px solid var(--line); }
-.witness-root .w-btn-danger { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
-.witness-root .w-kv { display: flex; justify-content: space-between; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--line); font-size: 12.5px; }
-.witness-root .w-kv:last-child { border-bottom: none; }
-.witness-root .w-kv-k { color: var(--muted); flex-shrink: 0; }
-.witness-root .w-kv-v { text-align: right; word-break: break-all; font-family: 'SFMono-Regular', Consolas, monospace; font-size: 11.5px; }
-.witness-root .w-copyable { display: flex; align-items: center; gap: 8px; background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; margin-top: 6px; }
-.witness-root .w-copyable-v { flex: 1; font-family: 'SFMono-Regular', Consolas, monospace; font-size: 11px; word-break: break-all; color: var(--cyan-light); }
-.witness-root .w-copyable button { flex-shrink: 0; background: var(--line); color: var(--paper); border: none; border-radius: 5px; padding: 6px 9px; font-size: 11px; cursor: pointer; }
-.witness-root .w-badge { display: inline-block; font-family: 'SFMono-Regular', Consolas, monospace; font-size: 10.5px; padding: 3px 8px; border-radius: 10px; border: 1px solid; margin-right: 6px; }
-.witness-root .w-ledger-item { border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin-bottom: 10px; background: var(--panel2); }
-.witness-root .w-ledger-lbl { font-weight: 700; font-size: 13.5px; margin-bottom: 4px; }
-.witness-root .w-empty { text-align: center; color: var(--muted); font-size: 13px; padding: 30px 10px; }
-.witness-root .w-result { border-radius: 8px; padding: 14px; margin-top: 12px; font-size: 13.5px; }
-.witness-root .w-result-good { background: rgba(63,164,92,0.12); border: 1px solid var(--good); color: #a9e0ba; }
-.witness-root .w-result-bad { background: rgba(194,75,75,0.12); border: 1px solid var(--danger); color: #f0b4b4; }
-.witness-root .w-preview { font-family: 'SFMono-Regular', Consolas, monospace; font-size: 12.5px; word-break: break-word; background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 10px; max-height: 160px; overflow: auto; white-space: pre-wrap; }
-.witness-root .w-footnote { color: var(--muted); font-size: 11.5px; margin-top: 8px; line-height: 1.5; }
-.witness-root .w-divider { height: 1px; background: var(--line); margin: 14px 0; }
+
+/* Atmospheric cyan radial glow behind the hero, matching the mockup */
+.witness-root::before {
+  content: '';
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 520px;
+  background: radial-gradient(circle at 50% 100px, rgba(0, 229, 204, 0.16) 0%, rgba(2, 28, 44, 0.28) 45%, rgba(4, 8, 16, 0) 80%);
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* Authentic 3D cybernetic mesh landscape background from the mockup */
+.witness-mesh-bg {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  height: 65vh;
+  background-image: url('/clean_mesh.jpg?v=3');
+  background-position: center bottom;
+  background-size: cover;
+  background-repeat: no-repeat;
+  pointer-events: none;
+  z-index: 1;
+  mask-image: linear-gradient(to top, rgba(0,0,0,1) 60%, rgba(0,0,0,0) 100%);
+  -webkit-mask-image: linear-gradient(to top, rgba(0,0,0,1) 60%, rgba(0,0,0,0) 100%);
+}
+
+.witness-container {
+  position: relative;
+  z-index: 10;
+  max-width: 680px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 32px 20px 80px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+/* Hero Section */
+.witness-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  margin-bottom: 26px;
+}
+
+.witness-eye-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 4px;
+  background: transparent !important;
+}
+
+.witness-eye-img {
+  width: 175px;
+  height: auto;
+  display: block;
+  filter: drop-shadow(0 0 28px rgba(0, 229, 204, 0.8));
+  background: transparent !important;
+}
+
+.witness-title {
+  margin: 2px 0 0;
+  font-family: 'Orbitron', 'Plus Jakarta Sans', sans-serif;
+  font-size: 42px;
+  font-weight: 800;
+  letter-spacing: 5px;
+  color: #ffffff;
+  text-transform: uppercase;
+  text-shadow: 0 0 30px rgba(0, 229, 204, 0.45);
+}
+
+.witness-tagline {
+  margin: 8px 0 0;
+  font-size: 14px;
+  color: #64748b;
+  letter-spacing: 0.8px;
+  font-weight: 400;
+}
+
+/* Tabs: Separated with '|' and NO horizontal divider line */
+.witness-tabs {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  margin-bottom: 28px;
+  width: 100%;
+}
+
+.witness-tab-btn {
+  position: relative;
+  background: transparent;
+  border: none;
+  color: #8da4be;
+  font-size: 15px;
+  font-weight: 600;
+  padding: 6px 4px;
+  cursor: pointer;
+  transition: all 0.25s ease;
+}
+
+.witness-tab-btn:hover {
+  color: #00e5cc;
+}
+
+.witness-tab-btn.active {
+  color: #ffffff;
+}
+
+.witness-tab-btn.active::after {
+  content: '';
+  position: absolute;
+  bottom: -4px;
+  left: -2px;
+  right: -2px;
+  height: 3px;
+  background: #00e5cc;
+  border-radius: 9999px;
+  box-shadow: 0 0 14px #00e5cc, 0 0 24px rgba(0, 229, 204, 0.9);
+}
+
+.witness-tab-pipe {
+  color: rgba(255, 255, 255, 0.16);
+  font-weight: 300;
+  font-size: 15px;
+  user-select: none;
+}
+
+/* Workspace: Form Elements Floating Directly Over Mesh */
+.witness-main {
+  width: 100%;
+  max-width: 540px;
+}
+
+.w-form-flow {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+}
+
+/* Dropzone matching Mockup */
+.w-dropzone {
+  background: rgba(8, 20, 32, 0.5);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1.5px dashed rgba(0, 229, 204, 0.38);
+  border-radius: 14px;
+  padding: 24px 20px;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.25s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.w-dropzone:hover, .w-dropzone.dragover {
+  border-color: #00e5cc;
+  background: rgba(10, 28, 44, 0.7);
+  box-shadow: 0 0 25px rgba(0, 229, 204, 0.25);
+}
+
+.w-drop-text {
+  font-size: 14px;
+  font-weight: 500;
+  color: #cbd5e1;
+}
+
+.w-browse-btn {
+  color: #00e5cc;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+/* Pill-shaped Capsule Inputs matching Mockup */
+.w-input {
+  width: 100%;
+  background: rgba(8, 20, 32, 0.5);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(0, 229, 204, 0.22);
+  border-radius: 9999px;
+  padding: 13px 22px;
+  font-size: 13.5px;
+  color: #e2e8f0;
+  outline: none;
+  transition: all 0.2s ease;
+  font-family: inherit;
+}
+
+.w-input::placeholder {
+  color: #64748b;
+}
+
+.w-input:focus {
+  border-color: #00e5cc;
+  box-shadow: 0 0 16px rgba(0, 229, 204, 0.35);
+  background: rgba(10, 26, 42, 0.75);
+}
+
+/* Glowing Pill Button matching Mockup */
+.w-btn-primary {
+  width: 100%;
+  background: linear-gradient(90deg, #00e5cc 0%, #00f5d4 100%);
+  color: #03080e;
+  font-weight: 700;
+  font-size: 14.5px;
+  letter-spacing: 0.5px;
+  padding: 14px 24px;
+  border-radius: 9999px;
+  border: none;
+  cursor: pointer;
+  box-shadow: 0 0 30px rgba(0, 229, 204, 0.6);
+  transition: all 0.25s ease;
+  margin-top: 4px;
+}
+
+.w-btn-primary:hover:not(:disabled) {
+  box-shadow: 0 0 42px rgba(0, 229, 204, 0.9);
+  transform: translateY(-1px);
+}
+
+.w-btn-primary:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.w-btn-ghost {
+  width: 100%;
+  background: transparent;
+  color: #94a3b8;
+  border: 1px solid rgba(0, 229, 204, 0.25);
+  padding: 11px;
+  border-radius: 9999px;
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.w-btn-ghost:hover {
+  color: #ffffff;
+  border-color: #00e5cc;
+}
+
+.w-btn-danger {
+  width: 100%;
+  background: transparent;
+  color: #ef4444;
+  border: 1px solid #ef4444;
+  padding: 10px;
+  border-radius: 9999px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* Sub-cards for Pending, Anchored, Ledger, and Verify */
+.w-card {
+  background: rgba(8, 20, 32, 0.6);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(0, 229, 204, 0.22);
+  border-radius: 16px;
+  padding: 20px;
+}
+
+.w-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.w-card-header h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+  color: #ffffff;
+}
+
+.w-step {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: rgba(0, 229, 204, 0.15);
+  color: #00e5cc;
+  font-size: 11px;
+  font-weight: bold;
+  border: 1px solid #00e5cc;
+}
+
+.w-desc {
+  color: #94a3b8;
+  font-size: 12.5px;
+  margin-bottom: 12px;
+  line-height: 1.5;
+}
+
+.w-kv {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(0, 229, 204, 0.1);
+  font-size: 12px;
+}
+
+.w-kv:last-child {
+  border-bottom: none;
+}
+
+.w-kv-k {
+  color: #94a3b8;
+  flex-shrink: 0;
+}
+
+.w-kv-v {
+  text-align: right;
+  word-break: break-all;
+  font-family: 'JetBrains Mono', Consolas, monospace;
+  font-size: 11.5px;
+  color: #e0f2fe;
+}
+
+.w-copyable {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: rgba(4, 9, 15, 0.7);
+  border: 1px solid rgba(0, 229, 204, 0.25);
+  border-radius: 8px;
+  padding: 8px 12px;
+}
+
+.w-copyable-v {
+  flex: 1;
+  font-family: 'JetBrains Mono', Consolas, monospace;
+  font-size: 11px;
+  word-break: break-all;
+  color: #00e5cc;
+}
+
+.w-copyable button {
+  background: rgba(0, 229, 204, 0.15);
+  color: #00e5cc;
+  border: 1px solid rgba(0, 229, 204, 0.35);
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.w-copyable button:hover {
+  background: #00e5cc;
+  color: #040810;
+}
+
+.w-badge {
+  display: inline-block;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 6px;
+  border: 1px solid;
+  margin-right: 6px;
+}
+
+.w-ledger-item {
+  border: 1px solid rgba(0, 229, 204, 0.15);
+  border-radius: 10px;
+  padding: 12px;
+  margin-bottom: 10px;
+  background: rgba(6, 12, 20, 0.5);
+}
+
+.w-ledger-lbl {
+  font-weight: 700;
+  font-size: 13.5px;
+  color: #ffffff;
+  margin-bottom: 6px;
+}
+
+.w-empty {
+  text-align: center;
+  color: #64748b;
+  font-size: 13px;
+  padding: 28px 10px;
+}
+
+.w-result {
+  border-radius: 10px;
+  padding: 12px;
+  margin-top: 10px;
+  font-size: 13px;
+}
+
+.w-result-good {
+  background: rgba(52, 211, 153, 0.1);
+  border: 1px solid rgba(52, 211, 153, 0.4);
+  color: #a7f3d0;
+}
+
+.w-result-bad {
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  color: #fca5a5;
+}
+
+.w-preview {
+  font-family: 'JetBrains Mono', Consolas, monospace;
+  font-size: 11.5px;
+  background: rgba(4, 9, 15, 0.7);
+  border: 1px solid rgba(0, 229, 204, 0.2);
+  border-radius: 8px;
+  padding: 10px;
+  max-height: 160px;
+  overflow: auto;
+  white-space: pre-wrap;
+  color: #e2e8f0;
+}
+
+.w-divider {
+  height: 1px;
+  background: rgba(0, 229, 204, 0.15);
+  margin: 14px 0;
+}
 `;
