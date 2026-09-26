@@ -143,12 +143,13 @@ function CaptureView({ onAnchored }) {
         return;
       }
 
-      const contentHash = await sha256Hex(bytes);
-
       const key = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt", "decrypt"]);
       const iv = crypto.getRandomValues(new Uint8Array(12));
       const encBuf = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, bytes);
       const rawKey = await crypto.subtle.exportKey("raw", key);
+
+      // V2 Architecture: Hash the ENCRYPTED blob instead of the raw file!
+      const encHash = await sha256Hex(encBuf);
 
       const encB64 = bufToB64(encBuf);
       const ivB64 = bufToB64(iv.buffer);
@@ -156,7 +157,7 @@ function CaptureView({ onAnchored }) {
 
       setPending({
         label: lbl,
-        hash: contentHash,
+        hash: encHash, // This is now the hash of the encrypted file
         encB64,
         ivB64,
         keyB64,
@@ -189,7 +190,7 @@ function CaptureView({ onAnchored }) {
 
       const existingTimestamp = await contract.anchors("0x" + pending.hash);
       if (existingTimestamp > 0n) {
-        alert("This exact hash is already anchored on the blockchain.");
+        alert("This exact encrypted payload is already anchored on the blockchain.");
         setAnchoring(false);
         return;
       }
@@ -211,12 +212,11 @@ function CaptureView({ onAnchored }) {
       const txHash = tx.hash;
       const block = receipt.blockNumber;
       const blockInfo = await provider.getBlock(block);
-      let timestamp = new Date().toISOString(); // fallback just in case RPC is slow
+      let timestamp = new Date().toISOString();
       if (blockInfo && blockInfo.timestamp) {
         timestamp = new Date(Number(blockInfo.timestamp) * 1000).toISOString();
       }
 
-      // Only push public records to local storage now
       const record = {
         id: "w_" + Date.now(),
         label: pending.label,
@@ -230,17 +230,15 @@ function CaptureView({ onAnchored }) {
       ledger.push(record);
       saveLedger(ledger);
 
-      // Generate v2 Reveal Code (Bundles IPFS CID and Decryption Keys)
-      const revealPayload = {
-        c: realCid,
-        k: pending.keyB64,
-        i: pending.ivB64,
-        m: pending.mimeType,
-        f: pending.fileName
-      };
-      const revealCode = "WITNESS2." + btoa(JSON.stringify(revealPayload));
+      // 1. Generate Public Verification Code (Only contains CID)
+      const verifyPayload = { c: realCid };
+      const verifyCode = "WITNESS_PUBLIC." + btoa(JSON.stringify(verifyPayload));
 
-      setAnchored({ txHash, block, timestamp, revealCode });
+      // 2. Generate Private Decryption Code (Contains Keys and Metadata)
+      const decryptPayload = { k: pending.keyB64, i: pending.ivB64, m: pending.mimeType, f: pending.fileName };
+      const decryptCode = "WITNESS_PRIVATE." + btoa(JSON.stringify(decryptPayload));
+
+      setAnchored({ txHash, block, timestamp, verifyCode, decryptCode });
       onAnchored?.();
       setPending(null);
     } catch (e) {
@@ -272,8 +270,8 @@ function CaptureView({ onAnchored }) {
       {pending && (
         <div className="w-card">
           <h2><span className="w-step">2</span>On-device result</h2>
-          <div className="w-desc">This is what would be sent onward — a hash and an encrypted blob. The original content stays right here.</div>
-          <KV k="SHA-256 hash" v={"0x" + pending.hash} />
+          <div className="w-desc">This is what would be sent onward — a hash of the encrypted blob.</div>
+          <KV k="Encrypted SHA-256 hash" v={"0x" + pending.hash} />
           <KV k="Encrypted size" v={`${pending.size} bytes → ${Math.ceil(pending.encB64.length * 0.75)} bytes encrypted`} />
           <button className="w-btn" onClick={doAnchor} disabled={anchoring}>
             {anchoring ? "⛓ Uploading to IPFS & Anchoring..." : "⛓ Anchor hash to chain"}
@@ -283,14 +281,25 @@ function CaptureView({ onAnchored }) {
 
       {anchored && (
         <div className="w-card">
-          <h2>✅ Anchored</h2>
+          <h2>✅ Anchored Securely</h2>
           <KV k="Tx hash" v={anchored.txHash} />
           <KV k="Block" v={"#" + anchored.block} />
           <KV k="Timestamp" v={anchored.timestamp.replace("T", " ").slice(0, 19) + " UTC"} />
           <div className="w-divider" />
-          <div className="w-desc" style={{ marginBottom: 6 }}>Reveal code — share this with one recipient when you're ready for them to verify and decrypt.</div>
-          <CopyField text={anchored.revealCode} />
-          <button className="w-btn w-btn-ghost" onClick={reset}>Anchor another item</button>
+          
+          <div className="w-desc" style={{ marginBottom: 6 }}>
+            <strong style={{color: "var(--cyan-light)"}}>1. Public Verification Code</strong><br/>
+            Share this publicly to prove the file exists and is timestamped, without revealing the file itself.
+          </div>
+          <CopyField text={anchored.verifyCode} />
+          
+          <div className="w-desc" style={{ marginBottom: 6, marginTop: 16 }}>
+            <strong style={{color: "var(--amber-light)"}}>2. Private Decryption Key</strong><br/>
+            Share this ONLY with authorized people to let them read the actual file.
+          </div>
+          <CopyField text={anchored.decryptCode} />
+          
+          <button className="w-btn w-btn-ghost" style={{marginTop: 20}} onClick={reset}>Anchor another item</button>
         </div>
       )}
     </>
@@ -334,76 +343,85 @@ function LedgerView({ version }) {
 }
 
 function VerifyView() {
-  const [code, setCode] = useState("");
-  const [result, setResult] = useState(null); 
-  const [preview, setPreview] = useState("");
+  const [verifyCode, setVerifyCode] = useState("");
+  const [decryptCode, setDecryptCode] = useState("");
+  
+  const [isVerifying, setIsVerifying] = useState(false);
+  const [verifyResult, setVerifyResult] = useState(null);
+  const [fetchedEncBuf, setFetchedEncBuf] = useState(null);
+  
+  const [isDecrypting, setIsDecrypting] = useState(false);
+  const [decryptResult, setDecryptResult] = useState(null);
   const [lastBytes, setLastBytes] = useState(null);
   const [lastRecord, setLastRecord] = useState(null);
-  const [isVerifying, setIsVerifying] = useState(false);
+  const [preview, setPreview] = useState("");
 
   const doVerify = async () => {
-    const trimmed = code.trim();
-    setResult(null); setPreview(""); setLastBytes(null); setLastRecord(null);
+    const trimmed = verifyCode.trim();
+    setVerifyResult(null); setFetchedEncBuf(null); setDecryptResult(null); setLastBytes(null); setPreview("");
     if (!trimmed) return;
     
     setIsVerifying(true);
     try {
-      if (!trimmed.startsWith("WITNESS2.")) throw new Error("That doesn't look like a Witness v2 reveal code.");
-      const payload = JSON.parse(atob(trimmed.slice("WITNESS2.".length)));
+      if (!trimmed.startsWith("WITNESS_PUBLIC.")) throw new Error("Invalid Public Verification Code.");
+      const payload = JSON.parse(atob(trimmed.slice("WITNESS_PUBLIC.".length)));
       
-      // 1. Fetch from IPFS
       const res = await fetch("https://gateway.pinata.cloud/ipfs/" + payload.c);
       if (!res.ok) throw new Error("Failed to fetch encrypted file from IPFS.");
       const encBuf = await res.arrayBuffer();
 
-      // 2. Decrypt
-      const keyBuf = b64ToBuf(payload.k);
-      const key = await crypto.subtle.importKey("raw", keyBuf, { name: "AES-GCM" }, false, ["decrypt"]);
-      const iv = new Uint8Array(b64ToBuf(payload.i));
-      const decBuf = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, encBuf);
-      
-      // 3. Recompute Hash
-      const recomputedHash = await sha256Hex(decBuf);
+      const encHash = await sha256Hex(encBuf);
 
-      // 4. Verify on Blockchain (Public Read, no wallet required!)
       const provider = new ethers.JsonRpcProvider("https://forno.celo-sepolia.celo-testnet.org");
       const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, provider);
-      const onChainTimestamp = await contract.anchors("0x" + recomputedHash);
-
-      setLastBytes(decBuf);
-      setLastRecord({ mimeType: payload.m, fileName: payload.f });
+      const onChainTimestamp = await contract.anchors("0x" + encHash);
 
       if (onChainTimestamp > 0n) {
         const dateStr = new Date(Number(onChainTimestamp) * 1000).toISOString().replace("T", " ").slice(0, 19);
-        setResult({
+        setVerifyResult({
           ok: true,
-          message: `Decrypted content's hash matches the on-chain record exactly! Unaltered since ${dateStr} UTC.`
+          message: `Encrypted payload verified! Matches exactly with Celo block timestamped at ${dateStr} UTC. (Contents are still hidden).`
         });
+        setFetchedEncBuf(encBuf);
       } else {
-        setResult({
+        setVerifyResult({
           ok: false,
-          message: "The decrypted content's hash does NOT match any on-chain record. This file was never anchored."
+          message: "The encrypted file's hash does NOT match the blockchain. It was altered or never anchored."
         });
       }
-      setPreview(tryDecodeText(decBuf));
     } catch (e) {
-      setResult({ ok: false, message: e.message });
+      setVerifyResult({ ok: false, message: e.message });
     }
     setIsVerifying(false);
   };
 
-  const doTamper = async () => {
-    if (!lastBytes || !lastRecord) {
-      alert("Verify a reveal code first, then try this.");
-      return;
+  const doDecrypt = async () => {
+    const trimmed = decryptCode.trim();
+    setDecryptResult(null); setLastBytes(null); setPreview("");
+    if (!trimmed || !fetchedEncBuf) return;
+    
+    setIsDecrypting(true);
+    try {
+      if (!trimmed.startsWith("WITNESS_PRIVATE.")) throw new Error("Invalid Private Decryption Code.");
+      const payload = JSON.parse(atob(trimmed.slice("WITNESS_PRIVATE.".length)));
+
+      const keyBuf = b64ToBuf(payload.k);
+      const key = await crypto.subtle.importKey("raw", keyBuf, { name: "AES-GCM" }, false, ["decrypt"]);
+      const iv = new Uint8Array(b64ToBuf(payload.i));
+      const decBuf = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, fetchedEncBuf);
+      
+      setLastBytes(decBuf);
+      setLastRecord({ mimeType: payload.m, fileName: payload.f });
+      
+      setDecryptResult({
+        ok: true,
+        message: "Successfully decrypted the verified evidence."
+      });
+      setPreview(tryDecodeText(decBuf));
+    } catch (e) {
+      setDecryptResult({ ok: false, message: "Decryption failed: Incorrect key or corrupted data." });
     }
-    const tampered = new Uint8Array(lastBytes.slice(0));
-    tampered[0] = tampered[0] ^ 0xff;
-    setResult({
-      ok: false,
-      message: "One byte of the content was altered. Recomputed hash no longer matches the on-chain record — tampering is instantly detectable.",
-    });
-    setPreview(tryDecodeText(tampered.buffer) + "\n\n[1 byte deliberately flipped for this demo]");
+    setIsDecrypting(false);
   };
 
   const doDownload = () => {
@@ -422,28 +440,51 @@ function VerifyView() {
   return (
     <>
       <div className="w-card">
-        <h2>Verify a reveal code</h2>
-        <div className="w-desc">Paste a reveal code from someone who anchored evidence. This will automatically fetch the encrypted file from IPFS, decrypt it locally, and verify the hash against the public blockchain.</div>
-        <textarea rows={3} placeholder="Paste reveal code here…" value={code} onChange={(e) => setCode(e.target.value)} />
+        <h2>1. Public Verification (No Decryption)</h2>
+        <div className="w-desc">Paste a Public Code to fetch the encrypted file and verify its hash on the blockchain.</div>
+        <textarea rows={2} placeholder="Paste WITNESS_PUBLIC code here…" value={verifyCode} onChange={(e) => setVerifyCode(e.target.value)} />
         <button className="w-btn w-btn-secondary" onClick={doVerify} disabled={isVerifying}>
-          {isVerifying ? "Fetching from IPFS & Verifying..." : "Decrypt & verify against chain"}
+          {isVerifying ? "Fetching & Verifying..." : "Verify Authenticity"}
         </button>
       </div>
 
-      {result && (
+      {verifyResult && (
         <div className="w-card">
-          <h2>Result</h2>
-          <div className={`w-result ${result.ok ? "w-result-good" : "w-result-bad"}`}>
-            <Badge tone={result.ok ? "good" : "bad"}>{result.ok ? "VERIFIED" : "MISMATCH / ERROR"}</Badge>
-            {result.message}
+          <div className={`w-result ${verifyResult.ok ? "w-result-good" : "w-result-bad"}`}>
+            <Badge tone={verifyResult.ok ? "good" : "bad"}>{verifyResult.ok ? "VERIFIED" : "ERROR"}</Badge>
+            {verifyResult.message}
           </div>
-          <div className="w-divider" />
-          <div className="w-desc" style={{ marginBottom: 6 }}>Recovered content preview</div>
-          <div className="w-preview">{preview}</div>
-          <div style={{ display: "flex", gap: "10px", marginTop: "10px" }}>
-            {lastBytes && <button className="w-btn" onClick={doDownload}>📥 Download Decrypted File</button>}
-            <button className="w-btn w-btn-ghost" onClick={doTamper}>🧪 Simulate tampering</button>
+          
+          {verifyResult.ok && fetchedEncBuf && (
+            <div style={{ marginTop: 20 }}>
+              <div className="w-divider" />
+              <h2>2. Decrypt Evidence</h2>
+              <div className="w-desc">You proved the encrypted file is authentic. If the uploader gave you authorization, paste the Private Key below to read it.</div>
+              <textarea rows={2} placeholder="Paste WITNESS_PRIVATE code here…" value={decryptCode} onChange={(e) => setDecryptCode(e.target.value)} />
+              <button className="w-btn" onClick={doDecrypt} disabled={isDecrypting}>
+                {isDecrypting ? "Decrypting..." : "Decrypt Evidence"}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {decryptResult && (
+        <div className="w-card">
+          <div className={`w-result ${decryptResult.ok ? "w-result-good" : "w-result-bad"}`}>
+            <Badge tone={decryptResult.ok ? "good" : "bad"}>{decryptResult.ok ? "UNLOCKED" : "ERROR"}</Badge>
+            {decryptResult.message}
           </div>
+          {decryptResult.ok && (
+            <>
+              <div className="w-divider" />
+              <div className="w-desc" style={{ marginBottom: 6 }}>Recovered content preview</div>
+              <div className="w-preview">{preview}</div>
+              <div style={{ display: "flex", gap: "10px", marginTop: "10px" }}>
+                <button className="w-btn" onClick={doDownload}>📥 Download File</button>
+              </div>
+            </>
+          )}
         </div>
       )}
     </>
