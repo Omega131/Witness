@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from "react";
 import { ethers } from "ethers";
 import { uploadToPinata } from "./utils/pinata.js";
 
-const CONTRACT_ADDRESS = "0x6cd840081fD86a3Af530dc6Fd06adcD100B1f590";
+const CONTRACT_ADDRESS = "0x28C82E2Cff9404A3e6818cc7b1f27374b9f90d48";
 const CONTRACT_ABI = [
   "function anchor(bytes32 contentHash, string calldata ipfsCid) external",
   "function anchors(bytes32) view returns (uint256)",
@@ -482,49 +482,6 @@ function CaptureView({ onAnchored }) {
   );
 }
 
-function LedgerView({ version }) {
-  const [ledger, setLedger] = useState([]);
-
-  useEffect(() => {
-    setLedger(loadLedger().slice().reverse());
-  }, [version]);
-
-  const reset = () => {
-    if (confirm("Clear the simulated ledger cache? This only affects this browser's demo data.")) {
-      saveLedger([]);
-      setLedger([]);
-    }
-  };
-
-  return (
-    <div className="w-form-flow">
-      <div className="w-card">
-        <div className="w-card-header">
-          <h2>Public Immutable Ledger</h2>
-        </div>
-        <div className="w-desc">
-          Every anchor is append-only and visible on-chain. Only cryptographic hashes and timestamps live here.
-        </div>
-        {ledger.length === 0 ? (
-          <div className="w-empty">No anchors yet — anchor evidence in the Capture tab to see records here.</div>
-        ) : (
-          ledger.map((r) => (
-            <div className="w-ledger-item" key={r.id}>
-              <div className="w-ledger-lbl">{r.label}</div>
-              <KV k="Hash" v={"0x" + r.hash.slice(0, 16) + "…" + r.hash.slice(-8)} />
-              <KV k="Block" v={"#" + r.block} />
-              <KV k="Timestamp" v={r.timestamp.replace("T", " ").slice(0, 19) + " UTC"} />
-              {r.cid && <KV k="IPFS CID" v={r.cid.slice(0, 20) + "…"} />}
-            </div>
-          ))
-        )}
-        <button className="w-btn-danger" style={{ marginTop: "16px" }} onClick={reset}>
-          Reset Local Indexer Cache
-        </button>
-      </div>
-    </div>
-  );
-}
 
 function VerifyView() {
   const [verifyCode, setVerifyCode] = useState("");
@@ -709,38 +666,13 @@ function VerifyView() {
   );
 }
 
-function AboutView() {
-  return (
-    <div className="w-form-flow">
-      <div className="w-card">
-        <div className="w-card-header">
-          <h2>Why Trustless Architecture?</h2>
-        </div>
-        <div className="w-desc">
-          A centralized timestamp server can be pressured, hacked, or compelled to falsify records by exactly the actors this tool protects people from. A public chain removes that single point of coercion — no one party controls it, so no one party can rewrite history on it.
-        </div>
-      </div>
 
-      <div className="w-card" style={{ marginTop: "16px" }}>
-        <div className="w-card-header">
-          <h2>What's Real in This Version?</h2>
-        </div>
-        <KV k="SHA-256 Hashing" v={<span style={{ color: "#34d399" }}>Real — Web Crypto API</span>} />
-        <KV k="AES-GCM Encryption" v={<span style={{ color: "#34d399" }}>Real — Web Crypto API</span>} />
-        <KV k="Blockchain Anchor" v={<span style={{ color: "#34d399" }}>Real — Live on Celo Sepolia</span>} />
-        <KV k="IPFS Storage" v={<span style={{ color: "#34d399" }}>Real — via Pinata</span>} />
-      </div>
-    </div>
-  );
-}
 
 // ---------------- Root Component ----------------
 
 const TABS = [
   { id: "capture", label: "Capture" },
-  { id: "ledger", label: "Ledger" },
-  { id: "verify", label: "Verify" },
-  { id: "about", label: "About" }
+  { id: "verify", label: "Verify" }
 ];
 
 export default function WitnessApp() {
@@ -778,33 +710,17 @@ export default function WitnessApp() {
           </button>
           <span className="witness-tab-pipe">|</span>
           <button
-            className={`witness-tab-btn ${tab === "ledger" ? "active" : ""}`}
-            onClick={() => setTab("ledger")}
-          >
-            Ledger
-          </button>
-          <span className="witness-tab-pipe">|</span>
-          <button
             className={`witness-tab-btn ${tab === "verify" ? "active" : ""}`}
             onClick={() => setTab("verify")}
           >
             Verify
-          </button>
-          <span className="witness-tab-pipe">|</span>
-          <button
-            className={`witness-tab-btn ${tab === "about" ? "active" : ""}`}
-            onClick={() => setTab("about")}
-          >
-            About
           </button>
         </nav>
 
         {/* Main Floating Workspace */}
         <main className="witness-main">
           {tab === "capture" && <CaptureView onAnchored={() => setLedgerVersion((v) => v + 1)} />}
-          {tab === "ledger" && <LedgerView version={ledgerVersion} />}
           {tab === "verify" && <VerifyView />}
-          {tab === "about" && <AboutView />}
         </main>
       </div>
     </div>
