@@ -2,6 +2,12 @@ import React, { useState, useEffect, useRef } from "react";
 import { ethers } from "ethers";
 import { uploadToPinata } from "./utils/pinata.js";
 
+const CONTRACT_ABI = [
+  "function anchor(bytes32 contentHash, string calldata ipfsCid) external",
+  "function anchors(bytes32) view returns (uint256)",
+  "event Anchored(bytes32 indexed contentHash, string ipfsCid, uint256 timestamp)"
+];
+
 const NETWORKS = {
   celo: {
     id: "celo",
@@ -37,9 +43,13 @@ function getWeb3Provider() {
 
 async function ensureNetwork(rawProvider, networkConfig) {
   try {
+    const currentChainId = await rawProvider.request({ method: "eth_chainId" });
+    if (currentChainId === networkConfig.chainIdHex || parseInt(currentChainId, 16) === parseInt(networkConfig.chainIdHex, 16)) {
+      return;
+    }
     await rawProvider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: networkConfig.chainIdHex }] });
   } catch (e) {
-    if (e.code === 4902) {
+    if (e.code === 4902 || (e.message && e.message.includes("4902"))) {
       await rawProvider.request({
         method: "wallet_addEthereumChain",
         params: [{
@@ -51,7 +61,7 @@ async function ensureNetwork(rawProvider, networkConfig) {
         }]
       });
     } else {
-      throw e;
+      console.warn("Chain switch note:", e);
     }
   }
 }
@@ -317,7 +327,7 @@ function CaptureView({ onAnchored, activeNetwork }) {
       setStatusMsg("Connecting Coinbase…");
       // Triggers Coinbase Wallet popup immediately on direct user click!
       await rawProvider.request({ method: "eth_requestAccounts" });
-      await ensureNetwork(rawProvider, NETWORKS[selectedNetworkId]);
+      await ensureNetwork(rawProvider, activeNetwork);
 
       const provider = new ethers.BrowserProvider(rawProvider);
       const signer = await provider.getSigner();
