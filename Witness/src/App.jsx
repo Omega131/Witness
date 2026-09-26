@@ -54,31 +54,8 @@ async function ensureNetwork(rawProvider, networkConfig) {
       throw e;
     }
   }
-});
-    if (currentChainId === CELO_SEPOLIA_CHAIN_ID_HEX || parseInt(currentChainId, 16) === 11142220) {
-      return;
-    }
-    await rawProvider.request({
-      method: "wallet_switchEthereumChain",
-      params: [{ chainId: CELO_SEPOLIA_CHAIN_ID_HEX }],
-    });
-  } catch (err) {
-    if (
-      err.code === 4902 ||
-      err?.data?.originalError?.code === 4902 ||
-      err?.message?.includes("Unrecognized chain ID") ||
-      err?.message?.includes("wallet_addEthereumChain") ||
-      err?.message?.includes("4902")
-    ) {
-      await rawProvider.request({
-        method: "wallet_addEthereumChain",
-        params: [CELO_SEPOLIA_CONFIG],
-      });
-    } else {
-      console.warn("Chain switch note:", err);
-    }
-  }
 }
+
 
 const STORAGE_KEY = "witness_ledger_v1";
 
