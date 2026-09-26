@@ -2,24 +2,25 @@ import React, { useState, useEffect, useRef } from "react";
 import { ethers } from "ethers";
 import { uploadToPinata } from "./utils/pinata.js";
 
-const CONTRACT_ADDRESS = "0x28C82E2Cff9404A3e6818cc7b1f27374b9f90d48";
-const CONTRACT_ABI = [
-  "function anchor(bytes32 contentHash, string calldata ipfsCid) external",
-  "function anchors(bytes32) view returns (uint256)",
-  "event Anchored(bytes32 indexed contentHash, string ipfsCid, uint256 timestamp)"
-];
-
-const CELO_SEPOLIA_CHAIN_ID_HEX = "0xaa044c"; // 11142220
-const CELO_SEPOLIA_CONFIG = {
-  chainId: CELO_SEPOLIA_CHAIN_ID_HEX,
-  chainName: "Celo Sepolia Testnet",
-  nativeCurrency: {
-    name: "CELO",
-    symbol: "CELO",
-    decimals: 18,
+const NETWORKS = {
+  celo: {
+    id: "celo",
+    chainIdHex: "0xaa044c",
+    name: "Celo Sepolia",
+    rpcUrls: ["https://celo-sepolia.drpc.org", "https://forno.celo-sepolia.celo-testnet.org"],
+    blockExplorerUrls: ["https://celo-sepolia.blockscout.com"],
+    nativeCurrency: { name: "CELO", symbol: "CELO", decimals: 18 },
+    contractAddress: "0x28C82E2Cff9404A3e6818cc7b1f27374b9f90d48"
   },
-  rpcUrls: ["https://celo-sepolia.drpc.org", "https://forno.celo-sepolia.celo-testnet.org"],
-  blockExplorerUrls: ["https://celo-sepolia.blockscout.com"],
+  polygon: {
+    id: "polygon",
+    chainIdHex: "0x13882",
+    name: "Polygon Amoy",
+    rpcUrls: ["https://polygon-amoy.drpc.org"],
+    blockExplorerUrls: ["https://amoy.polygonscan.com"],
+    nativeCurrency: { name: "POL", symbol: "POL", decimals: 18 },
+    contractAddress: "0x0000000000000000000000000000000000000000"
+  }
 };
 
 function getWeb3Provider() {
@@ -34,9 +35,26 @@ function getWeb3Provider() {
   return null;
 }
 
-async function ensureCeloNetwork(rawProvider) {
+async function ensureNetwork(rawProvider, networkConfig) {
   try {
-    const currentChainId = await rawProvider.request({ method: "eth_chainId" });
+    await rawProvider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: networkConfig.chainIdHex }] });
+  } catch (e) {
+    if (e.code === 4902) {
+      await rawProvider.request({
+        method: "wallet_addEthereumChain",
+        params: [{
+          chainId: networkConfig.chainIdHex,
+          chainName: networkConfig.name,
+          nativeCurrency: networkConfig.nativeCurrency,
+          rpcUrls: networkConfig.rpcUrls,
+          blockExplorerUrls: networkConfig.blockExplorerUrls
+        }]
+      });
+    } else {
+      throw e;
+    }
+  }
+});
     if (currentChainId === CELO_SEPOLIA_CHAIN_ID_HEX || parseInt(currentChainId, 16) === 11142220) {
       return;
     }
@@ -186,7 +204,7 @@ function CopyField({ text }) {
 
 // ---------------- main views ----------------
 
-function CaptureView({ onAnchored }) {
+function CaptureView({ onAnchored, activeNetwork }) {
   const fileRef = useRef(null);
   const [selectedFileName, setSelectedFileName] = useState("");
   const [textVal, setTextVal] = useState("");
@@ -322,11 +340,11 @@ function CaptureView({ onAnchored }) {
       setStatusMsg("Connecting Coinbase…");
       // Triggers Coinbase Wallet popup immediately on direct user click!
       await rawProvider.request({ method: "eth_requestAccounts" });
-      await ensureCeloNetwork(rawProvider);
+      await ensureNetwork(rawProvider, NETWORKS[selectedNetworkId]);
 
       const provider = new ethers.BrowserProvider(rawProvider);
       const signer = await provider.getSigner();
-      const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer);
+      const contract = new ethers.Contract(activeNetwork.contractAddress, CONTRACT_ABI, signer);
 
       // Resolve IPFS CID (either already finished in background or awaits completion)
       let realCid = pending.cid;
@@ -527,7 +545,7 @@ function CaptureView({ onAnchored }) {
 }
 
 
-function VerifyView() {
+function VerifyView({ activeNetwork }) {
   const [verifyCode, setVerifyCode] = useState("");
   const [decryptCode, setDecryptCode] = useState("");
   
@@ -560,15 +578,15 @@ function VerifyView() {
       const encHash = await sha256Hex(encBuf);
 
       // 3. Verify on Blockchain (Public Read via Celo Sepolia)
-      const provider = new ethers.JsonRpcProvider("https://forno.celo-sepolia.celo-testnet.org");
-      const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, provider);
+      const provider = new ethers.JsonRpcProvider(activeNetwork.rpcUrls[0]);
+      const contract = new ethers.Contract(activeNetwork.contractAddress, CONTRACT_ABI, provider);
       const onChainTimestamp = await contract.anchors("0x" + encHash);
 
       if (onChainTimestamp > 0n) {
         const dateStr = new Date(Number(onChainTimestamp) * 1000).toISOString().replace("T", " ").slice(0, 19);
         setVerifyResult({
           ok: true,
-          message: `Encrypted payload verified! Matches exactly with Celo block timestamped at ${dateStr} UTC. (Contents are still encrypted).`
+          message: `Encrypted payload verified! Matches exactly with  block timestamped at ${dateStr} UTC. (Contents are still encrypted).`
         });
         setFetchedEncBuf(encBuf);
       } else {
@@ -823,6 +841,7 @@ export default function WitnessApp() {
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [offlineChain, setOfflineChain] = useState([]);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [selectedNetworkId, setSelectedNetworkId] = useState("celo");
 
   useEffect(() => {
     const handleOnline = () => setIsOnline(true);
@@ -846,10 +865,10 @@ export default function WitnessApp() {
     setIsSyncing(true);
     try {
       await rawProvider.request({ method: "eth_requestAccounts" });
-      await ensureCeloNetwork(rawProvider);
+      await ensureNetwork(rawProvider, NETWORKS[selectedNetworkId]);
       const provider = new ethers.BrowserProvider(rawProvider);
       const signer = await provider.getSigner();
-      const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer);
+      const contract = new ethers.Contract(NETWORKS[selectedNetworkId].contractAddress, CONTRACT_ABI, signer);
       const pinataJwt = import.meta.env.VITE_PINATA_JWT;
 
       let successCount = 0;
@@ -969,11 +988,22 @@ export default function WitnessApp() {
 
         {/* Main Floating Workspace */}
         <main className="witness-main">
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '16px' }}>
+          <select 
+            className="w-input" 
+            style={{ width: 'auto', padding: '8px 16px', borderRadius: '12px', fontSize: '13px', cursor: 'pointer', backgroundColor: 'rgba(8, 20, 32, 0.8)' }}
+            value={selectedNetworkId}
+            onChange={(e) => setSelectedNetworkId(e.target.value)}
+          >
+            <option value="celo">Network: Celo Sepolia (Gas: CELO)</option>
+            <option value="polygon">Network: Polygon Amoy (Gas: POL)</option>
+          </select>
+        </div>
           <div style={{ display: tab === "capture" ? "block" : "none" }}>
-            <CaptureView onAnchored={() => setLedgerVersion((v) => v + 1)} />
+            <CaptureView onAnchored={() => setLedgerVersion((v) => v + 1)} activeNetwork={NETWORKS[selectedNetworkId]} />
           </div>
           <div style={{ display: tab === "verify" ? "block" : "none" }}>
-            <VerifyView />
+            <VerifyView activeNetwork={NETWORKS[selectedNetworkId]} />
           </div>
         </main>
       </div>
