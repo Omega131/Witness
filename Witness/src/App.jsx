@@ -662,7 +662,7 @@ function VerifyView() {
         ];
       }
 
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key=${apiKey}`, {
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${apiKey}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -670,7 +670,15 @@ function VerifyView() {
         })
       });
 
-      if (!response.ok) throw new Error("API request failed");
+      if (!response.ok) {
+         let errText = response.statusText;
+         try {
+           const errBody = await response.json();
+           errText = errBody.error?.message || JSON.stringify(errBody);
+         } catch(e) {}
+         throw new Error(`API request failed: ${response.status} - ${errText}`);
+      }
+      
       const data = await response.json();
       const textOutput = data.candidates?.[0]?.content?.parts?.[0]?.text;
       
