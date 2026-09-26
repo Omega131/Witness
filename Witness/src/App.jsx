@@ -115,6 +115,23 @@ function saveLedger(items) {
   }
 }
 
+const OFFLINE_CHAIN_KEY = "witness_offline_chain_v1";
+function loadOfflineChain() {
+  try {
+    const raw = localStorage.getItem(OFFLINE_CHAIN_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch (e) {
+    return [];
+  }
+}
+function saveOfflineChain(chain) {
+  try {
+    localStorage.setItem(OFFLINE_CHAIN_KEY, JSON.stringify(chain));
+  } catch (e) {
+    console.error("Local storage full!", e);
+  }
+}
+
 // ---------------- UI atoms ----------------
 
 function Badge({ children, tone = "cyan" }) {
@@ -247,6 +264,25 @@ function CaptureView({ onAnchored }) {
         fileName,
         cid: null,
       };
+
+      if (!navigator.onLine) {
+         // Secure in local offline blockchain
+         const chain = loadOfflineChain();
+         const prevHash = chain.length > 0 ? chain[chain.length - 1].hash : "GENESIS";
+         
+         const offlineBlock = {
+            ...pendingItem,
+            prevHash,
+            timestamp: new Date().toISOString()
+         };
+         chain.push(offlineBlock);
+         saveOfflineChain(chain);
+         
+         alert("No WiFi detected! Evidence encrypted and added to the Local Offline Blockchain. It will automatically prompt to sync when connection is restored.");
+         setSecuringLocally(false);
+         if (onAnchored) onAnchored(); 
+         return reset();
+      }
 
       // Start Pinata IPFS upload immediately in background so it's already ready when Button 2 is clicked!
       const pinataJwt = import.meta.env.VITE_PINATA_JWT;
@@ -678,6 +714,100 @@ const TABS = [
 export default function WitnessApp() {
   const [tab, setTab] = useState("capture");
   const [ledgerVersion, setLedgerVersion] = useState(0);
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [offlineChain, setOfflineChain] = useState([]);
+  const [isSyncing, setIsSyncing] = useState(false);
+
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+    setOfflineChain(loadOfflineChain());
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, [tab, ledgerVersion]); // refresh offline chain on tab or ledger changes
+
+  const syncOfflineItems = async () => {
+    if (offlineChain.length === 0) return;
+    const rawProvider = getWeb3Provider();
+    if (!rawProvider) {
+      alert("Please install Coinbase Wallet to sync.");
+      return;
+    }
+    setIsSyncing(true);
+    try {
+      await rawProvider.request({ method: "eth_requestAccounts" });
+      await ensureCeloNetwork(rawProvider);
+      const provider = new ethers.BrowserProvider(rawProvider);
+      const signer = await provider.getSigner();
+      const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer);
+      const pinataJwt = import.meta.env.VITE_PINATA_JWT;
+
+      let successCount = 0;
+      let newChain = [...offlineChain];
+
+      for (let i = 0; i < offlineChain.length; i++) {
+         const item = offlineChain[i];
+         const confirmSync = confirm(`Syncing offline block ${i+1}/${offlineChain.length}: "${item.label}". Click OK to confirm transaction in wallet.`);
+         if (!confirmSync) break; // User can pause sync
+         
+         const encBlob = new Blob([b64ToBuf(item.encB64)]);
+         const realCid = await uploadToPinata(encBlob, pinataJwt);
+         
+         const tx = await contract.anchor("0x" + item.hash, realCid, { gasLimit: 350000 });
+         const receipt = await tx.wait();
+         
+         const blockInfo = await provider.getBlock(receipt.blockNumber);
+         let timestamp = new Date().toISOString();
+         if (blockInfo && blockInfo.timestamp) {
+            timestamp = new Date(Number(blockInfo.timestamp) * 1000).toISOString();
+         }
+
+         const record = {
+            id: "w_sync_" + Date.now() + "_" + i,
+            label: item.label + " (Offline Synced)",
+            hash: item.hash,
+            cid: realCid,
+            txHash: tx.hash,
+            block: receipt.blockNumber,
+            timestamp
+         };
+         const ledger = loadLedger();
+         ledger.push(record);
+         saveLedger(ledger);
+
+         // We must give the user their keys since they skipped the UI
+         const verifyPayload = { c: realCid };
+         const verifyCode = "WITNESS_PUBLIC." + btoa(JSON.stringify(verifyPayload));
+         const decryptPayload = { k: item.keyB64, i: item.ivB64, m: item.mimeType, f: item.fileName };
+         const decryptCode = "WITNESS_PRIVATE." + btoa(JSON.stringify(decryptPayload));
+         
+         const keyFileText = `Witness Offline Sync Recovery\n\nLabel: ${item.label}\nTime: ${timestamp}\n\nPublic Verify Code:\n${verifyCode}\n\nPrivate Decrypt Code:\n${decryptCode}\n`;
+         const blobKey = new Blob([keyFileText], { type: "text/plain" });
+         const url = URL.createObjectURL(blobKey);
+         const a = document.createElement("a");
+         a.href = url;
+         a.download = `witness_keys_${item.hash.slice(0, 8)}.txt`;
+         a.click();
+         URL.revokeObjectURL(url);
+
+         successCount++;
+         newChain = newChain.filter(b => b.hash !== item.hash);
+         saveOfflineChain(newChain);
+         setOfflineChain(newChain);
+      }
+      
+      if (successCount > 0) alert(`Successfully synced ${successCount} offline items to the blockchain! Your decryption keys were downloaded as text files to your computer.`);
+      setLedgerVersion(v => v + 1);
+    } catch (e) {
+      alert("Sync interrupted: " + e.message);
+    } finally {
+      setIsSyncing(false);
+    }
+  };
 
   return (
     <div className="witness-root">
@@ -687,6 +817,20 @@ export default function WitnessApp() {
       <div className="witness-mesh-bg" />
 
       <div className="witness-container">
+        {!isOnline && (
+          <div style={{ background: "#fbbf24", color: "#1a1006", padding: "10px", textAlign: "center", fontWeight: "bold", borderRadius: "8px", marginBottom: "16px" }}>
+            ⚠ You are currently offline. Evidence will be secured in the Local Offline Chain.
+          </div>
+        )}
+        {isOnline && offlineChain.length > 0 && (
+          <div style={{ background: "rgba(0, 229, 204, 0.2)", border: "1px solid #00e5cc", color: "#fff", padding: "14px", textAlign: "center", borderRadius: "8px", marginBottom: "16px" }}>
+            <div style={{ fontWeight: "bold", marginBottom: "8px" }}>📡 WiFi Restored! You have {offlineChain.length} offline blocks waiting to be synced.</div>
+            <button className="w-btn-primary" onClick={syncOfflineItems} disabled={isSyncing}>
+              {isSyncing ? "Syncing to Blockchain..." : "Sync Offline Chain Now"}
+            </button>
+          </div>
+        )}
+
         {/* Hero Section: Truly transparent glowing eye, Orbitron title, tagline */}
         <header className="witness-hero">
           <div className="witness-eye-container">
