@@ -947,7 +947,7 @@ export default function WitnessApp() {
         <header className="witness-hero">
           <div className="witness-eye-container">
             <img
-              src="/logo_eye_transparent.png"
+              src={`${import.meta.env.BASE_URL}logo_eye_transparent.png`}
               alt="Witness Eye"
               className="witness-eye-img"
             />
@@ -1030,7 +1030,7 @@ const CSS = `
   left: 0;
   width: 100%;
   height: 65vh;
-  background-image: url('/clean_mesh.jpg?v=3');
+  background-image: url('./clean_mesh.jpg?v=3');
   background-position: center bottom;
   background-size: cover;
   background-repeat: no-repeat;
