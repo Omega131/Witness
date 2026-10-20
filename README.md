@@ -34,44 +34,49 @@
 ## Architecture Diagram
 
 ```mermaid
-flowchart TD
+graph TD
     subgraph Client ["Client Device (Browser / Mobile)"]
-        A[User Evidence: File / Photo / Video / Testimony]
-        B[Generate AES-GCM 256 Key & IV]
-        C[Encrypt Evidence On-Device]
-        D[Compute SHA-256 Hash of Ciphertext]
+        A["User Evidence (File / Photo / Testimony)"]
+        B["Generate AES-GCM 256 Key & IV"]
+        C["Encrypt Evidence On-Device"]
+        D["Compute SHA-256 Hash of Ciphertext"]
     end
 
     subgraph Storage ["Decentralized Storage"]
-        E[Pinata IPFS Gateway]
-        F[Encrypted Blob CID: bafy...]
+        E["Pinata IPFS Gateway"]
+        F["Encrypted Blob CID"]
     end
 
-    subgraph Blockchain ["Public EVM Blockchain (Celo Sepolia / Polygon Amoy)"]
-        G[WitnessAnchor.sol Contract]
-        H[Record block.timestamp & Emit Anchored Event]
+    subgraph Blockchain ["Public EVM Blockchain"]
+        G["WitnessAnchor.sol Contract (Celo / Polygon)"]
+        H["Store Timestamp & Emit Anchored Event"]
     end
 
-    subgraph DualCustody ["Dual Key & Code Separation"]
-        I1["WITNESS_PUBLIC Code (CID only)"]
-        I2["WITNESS_PRIVATE Key (AES Key, IV, MIME)"]
+    subgraph Keys ["Dual Key & Code Separation"]
+        I1["WITNESS_PUBLIC Code (IPFS CID)"]
+        I2["WITNESS_PRIVATE Key (AES Key, IV, Metadata)"]
     end
 
-    subgraph Verification ["Verification & Decryption Flow"]
-        J[Fetch Ciphertext from IPFS via CID]
-        K[Verify SHA-256 Hash against On-Chain Timestamp]
-        L[Decrypt with AES-GCM Key & Inspect Evidence]
-        M[Gemini 3.8 Flash AI Likelihood Detection]
+    subgraph Verify ["Verification & Decryption"]
+        J["Fetch Ciphertext from IPFS via CID"]
+        K["Verify Hash against On-Chain Timestamp"]
+        L["Decrypt Evidence with AES Key"]
+        M["Gemini 3.8 Flash AI Likelihood Detection"]
     end
 
-    A --> B --> C --> D
-    C -->|Upload Encrypted Blob| E --> F
-    D -->|anchor(hash, cid)| G --> H
+    A --> B
+    B --> C
+    C --> D
+    C -->|"Upload Encrypted Blob"| E
+    E --> F
+    D -->|"anchor(contentHash, ipfsCid)"| G
+    G --> H
     F --> I1
     B --> I2
-    I1 --> J --> K
-    K -->|Authenticated| L
-    I2 --> L
+    I1 -->|"Public Proof"| J
+    J --> K
+    K -->|"Verified Untampered"| L
+    I2 -->|"Private Decrypt"| L
     L --> M
 ```
 
