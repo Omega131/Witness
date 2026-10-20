@@ -84,6 +84,9 @@ graph TD
 
 [[Watch Demo Video]](https://github.com/user-attachments/assets/a5dd2a68-bbc2-43a5-8e3d-8677ed6bb03e)
 
+## Deployment 
+[APP](https://omega131.github.io/Witness/)
+
 ## The Problem
 
 Activists, journalists, human rights investigators, whistleblowers, and conflict victims routinely face a critical dilemma when documenting evidence:
